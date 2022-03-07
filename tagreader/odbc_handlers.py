@@ -3,7 +3,7 @@ import pyodbc
 import pandas as pd
 import numpy as np
 import warnings
-from typing import Union
+from typing import Any, Dict, Union, Optional
 from .utils import logging, winreg, find_registry_key, ReaderType
 
 logging.basicConfig(
@@ -58,15 +58,39 @@ def list_pi_sources():
             source_list.append(winreg.EnumKey(reg_key, i))
     return source_list
 
+class BaseHandlerODBC:
 
-class AspenHandlerODBC:
-    def __init__(self, host=None, port=None, options={}):
+    def __init__(self, host: Optional[str] = None, port: Optional[str] = None, options: Optional[Dict[str, Any]] = {}):
         self.host = host
         self.port = port
         self.conn = None
         self.cursor = None
         self._max_rows = options.get("max_rows", 100000)
         self._connection_string = options.get("connection_string", None)
+
+    def connect(self) -> None:
+        connection_string = self.generate_connection_string()
+        # The default autocommit=False is not supported by PI odbc driver.
+        self.conn = pyodbc.connect(connection_string, autocommit=True)
+        self.cursor = self.conn.cursor()
+    
+    def query_sql(self, query: str, parse: Optional[bool] = True) -> Union[pd.DataFrame, pyodbc.Cursor]:  # noqa:E501
+        if not parse:
+            cursor = self.conn.cursor()
+            cursor.execute(query)
+            return cursor
+        else:
+            res = pd.read_sql(query, self.conn)
+            return res
+    
+    def set_options(self, options):
+        pass
+
+    
+class AspenHandlerODBC(BaseHandlerODBC):
+
+    def __init__(self, host: Optional[str] = None, port: Optional[str] = None, options: Optional[Dict[str, Any]] = {}):
+        super().__init__(host, port, options)
 
     def generate_connection_string(self):
         if self._connection_string is None:
@@ -186,14 +210,6 @@ class AspenHandlerODBC:
 
         return " ".join(query)
 
-    def set_options(self, options):
-        pass
-
-    def connect(self):
-        connection_string = self.generate_connection_string()
-        # The default autocommit=False is not supported by PI odbc driver.
-        self.conn = pyodbc.connect(connection_string, autocommit=True)
-        self.cursor = self.conn.cursor()
 
     @staticmethod
     def _generate_query_get_mapdef_for_search(tag):
@@ -366,33 +382,16 @@ class AspenHandlerODBC:
         df = df.tz_localize("UTC")
         return df.rename(columns={"value": tag, "status": tag + "::status"})
 
-    def query_sql(
-        self, query: str, parse: bool = True
-    ) -> Union[pd.DataFrame, pyodbc.Cursor]:  # noqa:E501
-        if not parse:
-            cursor = self.conn.cursor()
-            cursor.execute(query)
-            return cursor
-        else:
-            res = pd.read_sql(query, self.conn)
-            return res
 
+class PIHandlerODBC(BaseHandlerODBC):
 
-class PIHandlerODBC:
-    def __init__(self, host=None, port=None, options={}):
-        self.host = host
-        self.port = port
-        self.conn = None
-        self.cursor = None
-        self._max_rows = options.get("max_rows", 100000)
+    def __init__(self, host: Optional[str] = None, port: Optional[str] = None, options: Optional[Dict[str, Any]] = {}):
+        super().__init__(host, port, options)
         # TODO: Find default das_server under
         # HKLM\SOFTWARE\Wow6432Node\PISystem\Analytics\InstallData/AFServer
         # It seems that is actually not possible anymore.
         # ws3099.statoil.net
         self._das_server = options.get("das_server", "piwebapi.equinor.com")
-        self._connection_string = options.get("connection_string", None)
-
-        # print(self._das_server)
 
     def generate_connection_string(self):
         if self._connection_string is None:
@@ -520,14 +519,6 @@ class PIHandlerODBC:
 
         return " ".join(query)
 
-    def set_options(self, options):
-        pass
-
-    def connect(self):
-        connection_string = self.generate_connection_string()
-        # The default autocommit=False is not supported by PI odbc driver.
-        self.conn = pyodbc.connect(connection_string, autocommit=True)
-        self.cursor = self.conn.cursor()
 
     def search(self, tag=None, desc=None):
         query = self.generate_search_query(tag, desc)
@@ -626,14 +617,3 @@ class PIHandlerODBC:
             df = df.drop(columns=["questionable", "substituted"])
 
         return df.rename(columns={"value": tag, "status": tag + "::status"})
-
-    def query_sql(
-        self, query: str, parse: bool = True
-    ) -> Union[pd.DataFrame, pyodbc.Cursor]:  # noqa: E501
-        if not parse:
-            cursor = self.conn.cursor()
-            cursor.execute(query)
-            return cursor
-        else:
-            res = pd.read_sql(query, self.conn)
-            return res
