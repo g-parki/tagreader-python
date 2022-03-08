@@ -1,7 +1,9 @@
 import re
 import urllib
 import warnings
-from typing import Union
+from abc import ABC, abstractmethod
+from enum import Enum
+from typing import Dict, Union
 
 import numpy as np
 import pandas as pd
@@ -20,6 +22,9 @@ logging.basicConfig(
     format=" %(asctime)s %(levelname)s: %(message)s", level=logging.INFO
 )
 
+class URLS(Enum):
+    ASPEN = r"https://aspenone.api.equinor.com"
+    PI = r"https://piwebapi.equinor.com/piwebapi"
 
 def get_auth_pi():
     return HTTPKerberosAuth(mutual_authentication=OPTIONAL)
@@ -30,7 +35,7 @@ def get_auth_aspen():
 
 
 def list_aspenone_sources(
-    url=r"https://aspenone.api.equinor.com",
+    url=URLS.ASPEN,
     auth=get_auth_aspen(),
     verifySSL=True,
 ):
@@ -52,7 +57,9 @@ def list_aspenone_sources(
 
 
 def list_piwebapi_sources(
-    url=r"https://piwebapi.equinor.com/piwebapi", auth=get_auth_pi(), verifySSL=True
+    url=URLS.PI,
+    auth=get_auth_pi(),
+    verifySSL=True,
 ):
     url_ = urljoin(url, "dataservers")
     res = requests.get(url_, auth=auth, verify=verifySSL)
@@ -64,29 +71,89 @@ def list_piwebapi_sources(
     elif res.status_code == 401:
         print("Not authorized")
 
+class BaseHandlerWeb(ABC):
+    @property
+    @abstractmethod
+    def _default_max() -> int:
+        pass
 
-class AspenHandlerWeb:
+    @property
+    @abstractmethod
+    def _default_URL() -> str:
+        pass
+
+    @property
+    @abstractmethod
+    def _default_auth() -> HTTPKerberosAuth:
+        pass
+
     def __init__(
         self,
-        datasource=None,
         url=None,
+        datasource=None,
         auth=None,
         verifySSL=None,
         options={},
     ):
-        self._max_rows = options.get("max_rows", 100000)
-        if url is None:
-            url = r"https://aspenone.api.equinor.com"
-        self.base_url = url
+        self._max_rows = options.get("max_rows", self._default_max)
+        self.base_url = url or self._default_URL
         self.datasource = datasource
         self.session = requests.Session()
+        self.session.auth = auth or self._default_auth
         self.session.verify = verifySSL if verifySSL is not None else True
-        self.session.auth = auth if auth else get_auth_aspen()
-        self._connection_string = ""  # Used for raw SQL queries
 
     @staticmethod
     def generate_connection_string(host, *_, **__):
         raise NotImplementedError
+
+    @abstractmethod
+    def generate_read_query():
+        pass
+
+    @abstractmethod
+    def verify_connection() -> bool:
+        pass
+
+    def connect(self):
+        self.verify_connection(self.datasource)
+
+    @abstractmethod
+    def search() -> list:
+        pass
+
+    @abstractmethod
+    def _get_tag_metadata() -> Dict:
+        pass
+
+    @abstractmethod
+    def _get_tag_unit() -> str:
+        pass
+
+    @abstractmethod
+    def _get_tag_description() -> str:
+        pass
+
+    @abstractmethod
+    def read_tag() -> pd.DataFrame:
+        pass
+
+
+class AspenHandlerWeb(BaseHandlerWeb):
+    _default_max = 100000
+    _default_URL = URLS.ASPEN
+    _default_auth = get_auth_aspen()
+
+    def __init__(
+        self,
+        url=None,
+        datasource=None,
+        auth=None,
+        verifySSL=None,
+        options={},
+    ):
+        super().__init__(url, datasource, auth, verifySSL, options)
+        self._connection_string = ""  # Used for raw SQL queries
+
 
     @staticmethod
     def generate_search_query(tag=None, desc=None, datasource=None):
@@ -219,8 +286,6 @@ class AspenHandlerWeb:
                 return True
         return False
 
-    def connect(self):
-        self.verify_connection(self.datasource)
 
     @staticmethod
     def split_tagmap(tagmap):
@@ -513,7 +578,11 @@ class AspenHandlerWeb:
         return res.text
 
 
-class PIHandlerWeb:
+class PIHandlerWeb(BaseHandlerWeb):
+    _default_max = 10000
+    _default_URL = URLS.PI
+    _default_auth = get_auth_pi()
+
     def __init__(
         self,
         url=None,
@@ -522,19 +591,9 @@ class PIHandlerWeb:
         verifySSL=None,
         options={},
     ):
-        self._max_rows = options.get("max_rows", 10000)
-        if url is None:
-            url = r"https://piwebapi.equinor.com/piwebapi"
-        self.base_url = url
-        self.datasource = datasource
-        self.session = requests.Session()
-        self.session.verify = verifySSL if verifySSL is not None else True
-        self.session.auth = auth if auth else get_auth_pi()
+        super().__init__(url, datasource, auth, verifySSL, options)
         self.webidcache = {}
 
-    @staticmethod
-    def generate_connection_string(host, *_, **__):
-        raise NotImplementedError
 
     @staticmethod
     def escape(s):
@@ -691,8 +750,6 @@ class PIHandlerWeb:
                 return True
         return False
 
-    def connect(self):
-        self.verify_connection(self.datasource)
 
     def search(self, tag=None, desc=None):
         params = self.generate_search_query(tag, desc, self.datasource)
